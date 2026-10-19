@@ -1,21 +1,232 @@
+<!-- @format -->
+
 # Mini Redis
 
-Python으로 해시맵, 이중 연결 리스트, 최소 힙을 직접 구현한 CLI 기반 문자열 저장소입니다.
-`5-1.pdf`의 필수 요구사항을 대상으로 구현했으며 보너스 과제는 포함하지 않습니다.
+Python으로 만든 이지영의 CLI 기반 Key-Value 저장소 학습 프로젝트입니다. 해시맵·이중 연결 리스트·최소 힙을 직접 구현하고, 문자열 명령어와 LRU 메모리 관리·TTL 만료 처리를 연결했습니다. 외부 패키지와 내장 `dict`, `set`, `collections`, `heapq`는 사용하지 않았습니다.
 
-## 실행
+## 1. 개발 목적과 학습 범위
 
-Python 3.8 이상이 필요합니다. 외부 패키지 설치는 필요하지 않습니다.
-프로젝트 폴더에서 실행하세요.
+이번 과제는 Redis의 빠른 조회와 메모리 관리가 어떤 자료구조로 동작하는지 이해하는 것이 목적입니다. 키로 값을 찾는 과정, 최근 사용 순서를 바꾸는 과정, 만료된 데이터를 삭제하는 과정을 직접 작성했습니다.
 
-```bash
-python3 main.py
-# 또는
-python3 -m mini_redis
+```text
+사용자 명령 입력
+  → shlex로 명령과 인자 분리
+  → 명령·인자 개수·정수 형식 확인
+  → 저장소 접근 시 만료된 키 정리
+  → 데이터 조회·변경 또는 메모리·TTL 관리
+  → Redis 스타일 결과 출력
+  → 다음 명령 대기
 ```
 
-`mini-redis>` 프롬프트에 명령어를 입력합니다. `exit`, `quit`, EOF(Ctrl+D), Ctrl+C로 종료합니다.
-데이터는 메모리에만 존재하며 프로그램을 종료하면 사라집니다.
+키 조회에는 체이닝 해시맵, 최근 사용 순서에는 이중 연결 리스트, 가장 빠른 만료 탐색에는 최소 힙을 사용합니다. 자료구조를 독립된 모듈로 나누고 저장소와 CLI를 분리하여 각 역할을 확인할 수 있게 했습니다.
+
+## 2. 개발 환경과 실행 조건
+
+| 구분 | 내용 |
+| --- | --- |
+| 언어 | Python 3.8 이상 문법으로 작성 |
+| 실행 검증 | Python 3.13, Python 3.8 문법은 AST 파싱으로 확인 |
+| 실행 환경 | Python을 실행할 수 있는 터미널 |
+| 실행 명령 | `python3 main.py` 또는 `python3 -m mini_redis` |
+| 인터페이스 | `mini-redis>` 프롬프트의 REPL |
+| 프로그램 사용 모듈 | json, shlex, time 및 직접 작성한 모듈 |
+| 테스트 | Python 표준 라이브러리 unittest |
+| 데이터 저장 | 실행 중 메모리 |
+| 외부 패키지·설치·빌드 | 필요 없음 |
+
+네트워크와 별도의 Redis 서버 없이 실행합니다. 데이터 영속성은 구현하지 않았으므로 종료하면 모든 키와 통계가 사라집니다. 다시 실행하면 빈 저장소로 시작하며 별도 초기화 명령은 필요하지 않습니다.
+
+## 3. 파일별 책임과 실행 순서
+
+| 파일·폴더 | 책임 | 주요 내용 |
+| --- | --- | --- |
+| main.py | 실행 진입점 | CLI의 main 호출 |
+| mini_redis/__main__.py | 모듈 실행 | `python3 -m mini_redis` 지원 |
+| mini_redis/__init__.py | 공개 API | MiniRedis 클래스 제공 |
+| mini_redis/cli.py | 사용자 입출력 | 파싱, 인자 검사, 명령 분기, 응답 형식, REPL |
+| mini_redis/store.py | 저장소 정책 | Entry, 문자열 명령, LRU, TTL, 메모리 집계 |
+| mini_redis/hash_map.py | 키 기반 조회 | UTF-8 해시, 체이닝 충돌 해결, 리해시 |
+| mini_redis/linked_list.py | 연결과 순서 | Node, 양 끝 삽입·삭제, 임의 노드 이동 |
+| mini_redis/min_heap.py | 만료 순서 | 최소 힙, 키 위치 맵, 갱신과 임의 삭제 |
+| tests/test_mini_redis.py | 자동 검증 | 자료구조, 명령어, 경계 조건, CLI 프로세스 |
+| README.md | 설계·실행 안내 | 구현 이유, 명령어, 실행 예시, 검증, 확장 설계 |
+| .gitignore | 추적 제외 설정 | Python 캐시와 macOS 메타데이터 제외 |
+
+실행하면 `cli.main()`에서 `CommandProcessor`와 `MiniRedis` 객체를 생성합니다. `input()`으로 한 줄을 읽고 `execute()`에 전달한 뒤 응답을 출력합니다. 입력 오류가 있어도 다음 입력을 받으며 EXIT·QUIT·EOF·Ctrl+C로 종료합니다.
+
+## 4. 핵심 코드와 구현 이유
+
+### 명령 파싱과 문자열 인자
+
+```python
+args = shlex.split(line, comments=False)
+command = args[0].upper()
+```
+
+`shlex.split()`은 `SET name "Alice Kim"`의 값을 하나의 인자로 해석합니다. 코드에서는 빈 입력인지 먼저 확인한 뒤 `args[0]`에 접근합니다. 명령어만 대문자로 바꾸므로 키와 값의 대소문자는 유지됩니다. 결과 문자열은 `json.dumps(..., ensure_ascii=False)`로 따옴표를 붙이고 한글은 그대로 표시합니다.
+
+### 직접 구현한 해시와 체이닝
+
+```python
+result = 14695981039346656037
+for byte in key.encode("utf-8"):
+    result = ((result ^ byte) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+```
+
+FNV-1a 방식으로 UTF-8 바이트를 섞어 64비트 해시를 계산합니다. Python의 `hash()`는 사용하지 않습니다. `해시 % capacity`로 버킷을 선택하고 같은 버킷에 들어온 키는 이중 연결 리스트에 저장합니다. 충돌하더라도 실제 키를 비교하므로 값을 구분할 수 있습니다.
+
+```python
+if self._size * 4 > self.capacity * 3:
+    old = self._buckets
+    self._buckets = [None] * (self.capacity * 2)
+```
+
+로드 팩터가 0.75를 초과하면 버킷 수를 두 배로 늘립니다. 이후 기존 항목을 모두 재삽입하여 새 버킷 수에 맞는 위치를 계산합니다. 기존 키의 값만 변경하면 키 개수는 늘어나지 않습니다.
+
+### 해시맵과 LRU 노드 연결
+
+```python
+entry = Entry(value, self._lru.insert_front(key))
+self._data.put(key, entry)
+```
+
+새 키는 LRU 리스트의 맨 앞에 삽입합니다. Entry가 해당 노드의 참조를 보관하므로 해시맵에서 찾은 뒤 리스트를 다시 순회할 필요가 없습니다. 성공한 GET과 기존 키 SET은 `move_to_front(entry.node)`로 최근 사용 위치를 갱신합니다.
+
+### 메모리 제한과 LRU 제거
+
+```python
+while self.maxmemory > 0 and self.used_memory > self.maxmemory:
+    self._delete(self._lru.tail.data)
+    self.evicted_keys += 1
+```
+
+리스트의 뒤인 tail이 가장 오래 사용하지 않은 키입니다. 제한 이하가 될 때까지 반복 제거하며 각 제거를 통계에 누적합니다. DEL과 TTL 만료도 `_delete()`로 자료구조를 함께 정리하지만 `evicted_keys`를 증가시키지는 않습니다.
+
+### 최소 힙과 TTL
+
+```python
+entry.expire_at = self._clock() + seconds
+self._expiry.push((entry.expire_at, key))
+```
+
+EXPIRE는 남은 초를 절대 만료 시각으로 변환해 최소 힙에 저장합니다. 가장 빠른 만료가 루트에 있으므로 전체 키를 매번 순회하지 않아도 됩니다. 시스템 시각 변경의 영향을 피하도록 `time.monotonic()`을 사용합니다.
+
+힙과 함께 `key → 배열 인덱스`를 저장하는 자체 해시맵을 둡니다. 같은 키의 TTL을 다시 설정하면 기존 항목을 갱신하고, DEL·덮어쓰기·LRU 제거 시 만료 항목을 실제로 제거하여 오래된 예약이 쌓이지 않게 합니다.
+
+## 5. 필수 요구사항별 구현 근거
+
+아래 번호는 README에서 정리한 번호이며 추가 평가표의 번호와는 다릅니다.
+
+| 번호 | 요구사항 | 구현 근거 |
+| --- | --- | --- |
+| 1 | 이중 연결 리스트 | prev/next/data 노드, 6개 삽입·삭제·이동 메서드 |
+| 2 | 체이닝 해시맵 | put/get/remove/contains/keys/size, 직접 구현한 해시 |
+| 3 | 로드 팩터에 따른 확장 | 0.75 초과 시 버킷 2배 및 리해시 |
+| 4 | 최소 힙 | push/pop/peek/size, heapify_up/down, TTL 위치 맵 |
+| 5 | 문자열 명령 6개 | SET/GET/DEL/EXISTS/DBSIZE/KEYS |
+| 6 | 메모리 명령 2개 | CONFIG SET maxmemory, INFO memory |
+| 7 | LRU 자동 제거 | 성공한 SET/GET의 앞 이동, 초과 시 tail 반복 삭제 |
+| 8 | TTL 명령 2개 | EXPIRE/TTL, 명령 처리 시 힙 기반 만료 정리 |
+| 9 | 연계 삭제와 덮어쓰기 | DEL의 데이터·LRU·TTL 삭제, SET의 TTL 초기화 |
+| 10 | Redis 스타일 출력과 오류 | OK, (nil), (integer), (error), OOM |
+| 11 | 내장 Key-Value 컬렉션 제한 | dict/set/collections 미사용, 리스트는 배열·결과 나열에 사용 |
+| 12 | 독립 모듈과 설명 | 자료구조별 파일 분리, 한국어 주석과 docstring |
+
+동적 배열 별도 구현, 스택/큐/덱 과제, 이진 트리/BST, Pub/Sub는 선택 보너스이므로 포함하지 않았습니다.
+
+## 6. 자료구조와 알고리즘의 시간복잡도
+
+n은 저장된 키 수, t는 TTL이 있는 키 수, k는 이번에 정리할 만료 키 수, b는 해시맵 버킷 수입니다. 아래 복잡도는 키 길이를 일정하게 보았을 때의 기준입니다.
+
+| 구조·작업 | 시간복잡도 | 근거 |
+| --- | --- | --- |
+| 해시맵 조회·삭제 | 평균 O(1), 최악 O(n) | 버킷 선택 후 충돌 체인 탐색 |
+| 해시맵 삽입 | 평균 상환 O(1) | 확장 시에는 전체 재삽입 비용 발생 |
+| 리해시 | 정상적인 해시 분포에서 O(n) | 새 버킷에 모든 항목 재삽입, 충돌 집중 시 더 커질 수 있음 |
+| 연결 리스트 삽입·삭제·이동 | O(1) | 인접 노드와 head/tail만 변경 |
+| 최소 힙 peek | O(1) | 배열의 첫 항목 확인 |
+| 최소 힙 삽입·갱신·삭제 | 평균 상환 O(log(t+1)) | 높이만큼 이동, 자체 위치 해시맵 비용 포함 |
+| 만료 정리 | 평균 상환 O(k log(t+1)) | 만료된 루트부터 반복 삭제 |
+| KEYS | O(b+n), 출력 길이 비용 별도 | 버킷 순회 및 키 목록 생성 |
+| DBSIZE | 만료 정리 이후 O(1) | 저장된 size 값 반환 |
+
+해시 계산은 키의 UTF-8 바이트 길이에 비례합니다. SET의 크기 계산은 키와 값의 바이트 길이에 비례하며, 메모리 초과 시 여러 키 제거 비용이 추가됩니다. GET의 LRU 이동은 O(1)이지만 명령 앞의 만료 정리 비용은 별도입니다. 해시 충돌과 리사이즈 때문에 모든 명령이 항상 O(1)이라고 볼 수는 없습니다.
+
+## 7. 저장소 구조와 LRU 변화
+
+아래는 자료구조의 역할을 설명한 구조도이며 실제 화면 캡처는 아닙니다.
+
+```text
+key → HashMap → Entry(value, expire_at, node)
+                                      │
+                                      └→ LRU 리스트의 해당 노드
+
+LRU: head [가장 최근 키] ↔ [...] ↔ [가장 오래된 키] tail
+TTL: 최소 힙 [(가장 빠른 expire_at, key), ...]
+     위치 맵 [key → 힙 배열 인덱스]
+```
+
+예를 들어 다음 순서에서 왼쪽을 가장 최근 사용 위치로 봅니다.
+
+| 명령 | LRU 순서 | 의미 |
+| --- | --- | --- |
+| `SET a 1` | a | 새 키를 앞에 삽입 |
+| `SET b 2` | b → a | a가 가장 오래된 키 |
+| `GET a` | a → b | 성공한 조회가 a를 앞으로 이동 |
+| `EXISTS b` | a → b | 존재 확인은 최근 사용 순서를 바꾸지 않음 |
+| `CONFIG SET maxmemory 2` | a | 각각 2바이트인 두 키 중 tail인 b 제거 |
+
+## 8. 로컬 실행과 입력 방법
+
+1. 프로젝트 폴더를 터미널에서 엽니다.
+2. `python3 main.py`를 실행합니다.
+3. `mini-redis>`이 나타나면 `SET name "Jiyoung"`을 입력합니다.
+4. `GET name`으로 저장한 값을 확인합니다.
+5. `QUIT`으로 종료하면 일반 터미널로 돌아옵니다.
+
+```sh
+python3 main.py
+```
+
+`mini-redis>`은 프로그램이 표시하는 프롬프트이므로 직접 입력하지 않습니다. `%` 또는 `$`가 있는 일반 터미널에서는 Python 실행·테스트·실제 Git 명령을 사용하고, `mini-redis>`에서는 아래의 Mini Redis 명령을 사용합니다.
+
+## 9. 명령어와 메모리·TTL 규칙
+
+| 명령 | 동작과 반환값 |
+| --- | --- |
+| `SET key value` | 저장 또는 덮어쓰기, TTL 초기화, LRU 갱신. `OK` |
+| `GET key` | 성공하면 LRU 갱신 후 `"value"`, 없거나 만료되면 `(nil)` |
+| `DEL key` | 데이터·LRU·TTL 삭제. 성공 `1`, 없는 키 `0` |
+| `EXISTS key` | 존재하면 `1`, 없으면 `0` |
+| `DBSIZE` | 만료되지 않은 키 수 |
+| `KEYS` | 번호가 붙은 전체 키 목록 또는 `(empty array)`, 패턴 인자 없음 |
+| `CONFIG SET maxmemory bytes` | 0 이상의 정수로 제한 설정. 0은 무제한. `OK` |
+| `INFO memory` | used_memory/maxmemory/evicted_keys 출력 |
+| `EXPIRE key seconds` | 성공 `1`, 없는 키 `0`. 0 이하이면 즉시 삭제 |
+| `TTL key` | 남은 초 내림, 만료 예약 없음 `-1`, 없는 키 `-2` |
+| `EXIT` / `QUIT` | 프로그램 종료 |
+
+숫자 결과는 `(integer) N` 형식입니다. 명령어와 CONFIG/INFO 옵션은 대소문자를 구분하지 않고 키·값은 구분합니다. 공백 없는 문자열, 큰따옴표·작은따옴표 문자열, 빈 문자열을 지원합니다. 따옴표와 역슬래시는 `shlex`의 POSIX 규칙을 따릅니다. 정수는 ASCII 숫자와 선택적 부호를 허용하며 signed 64-bit 범위를 검사합니다.
+
+### 메모리 계산과 OOM
+
+```text
+used_memory = Σ(len(key.encode('utf-8')) + len(value.encode('utf-8')))
+```
+
+노드·포인터·버킷 등 구조체 오버헤드는 제외합니다. `이름` → `홍길동`은 6 + 9 = 15바이트입니다. 덮어쓸 때는 기존 크기를 빼고 새 크기를 더하며, 삭제할 때는 삭제한 크기를 뺍니다.
+
+단일 엔트리가 제한보다 크면 저장 전에 OOM을 반환하여 기존 값·TTL·LRU를 보존합니다. 이미 만료된 키의 정리는 수행합니다. 저장 가능한 엔트리이지만 전체 사용량이 초과하면 LRU 순서로 제거합니다. CONFIG로 제한을 낮추면 즉시 LRU 제거를 수행합니다.
+
+### TTL과 갱신 순서
+
+GET은 만료 정리 → 키 조회 → 존재하는 경우만 LRU 갱신 → 값 반환 순서입니다. SET으로 덮어쓰면 이전 TTL이 취소됩니다. DEL과 만료 삭제는 데이터·LRU·TTL 구조를 함께 정리합니다.
+
+만료 정리는 저장소 명령 처리 시 실행하며 유휴 중에는 실행하지 않습니다. 다음 명령에서 밀린 만료를 정리하므로 응답이 늦어질 수 있습니다. TTL은 정리 시점의 시각을 기준으로 판정하고, 남은 시간이 1초 미만이면 0을 반환할 수 있습니다.
+
+## 10. 실행 예시와 결과 해석
+
+아래는 PDF 예시와 자동 테스트에서 검증하는 시나리오를 정리한 것입니다. 사용자의 터미널 화면 캡처는 아닙니다.
 
 ```text
 mini-redis> CONFIG SET maxmemory 30
@@ -32,149 +243,96 @@ mini-redis> INFO memory
 used_memory:22
 maxmemory:30
 evicted_keys:1
-mini-redis> EXPIRE user:2 3
+mini-redis> DBSIZE
+(integer) 2
+mini-redis> EXPIRE user:2 0
 (integer) 1
 mini-redis> TTL user:2
-(integer) 2
+(integer) -2
+mini-redis> KEYS
+1. "user:3"
+mini-redis> QUIT
 ```
 
-TTL 출력은 입력 사이에 흐른 시간에 따라 달라집니다. 3초가 지난 뒤 `GET user:2`는 `(nil)`,
-`TTL user:2`는 `(integer) -2`를 반환합니다.
-
-## 지원 명령어
-
-명령어와 CONFIG/INFO 옵션은 대소문자를 구분하지 않습니다. 키와 값은 구분합니다.
-공백 없는 문자열, 큰따옴표 및 작은따옴표로 감싼 문자열, 빈 문자열을 지원합니다.
-따옴표와 역슬래시 처리는 Python `shlex`의 POSIX 규칙을 따릅니다.
-
-| 명령어 | 동작 및 출력 |
+| 확인 항목 | 실행 결과와 의미 |
 | --- | --- |
-| `SET key value` | 저장/덮어쓰기, TTL 초기화, LRU 갱신. `OK` |
-| `GET key` | 값의 따옴표 문자열 또는 `(nil)`. 성공한 조회만 LRU 갱신 |
-| `DEL key` | 데이터·LRU·TTL 항목 삭제. `(integer) 1` 또는 `0` |
-| `EXISTS key` | 존재 여부. `(integer) 1` 또는 `0` |
-| `DBSIZE` | 만료되지 않은 키 수. `(integer) N` |
-| `KEYS` | 번호가 붙은 전체 키 목록 또는 `(empty array)`. 패턴 인자 없음 |
-| `CONFIG SET maxmemory bytes` | UTF-8 바이트 기준 제한 설정. 0은 무제한. `OK` |
-| `INFO memory` | `used_memory`, `maxmemory`, `evicted_keys` 출력 |
-| `EXPIRE key seconds` | TTL 설정. 성공 시 `1`, 없는 키 `0`. 0 이하이면 즉시 삭제 |
-| `TTL key` | 남은 초를 내림한 정수. 없는 키 `-2`, TTL 없는 키 `-1` |
+| 키별 크기 | user:1은 11, user:2는 9, user:3은 13바이트 |
+| 메모리 초과 | 세 키의 합 33이 제한 30을 초과 |
+| LRU 제거 | 가장 오래된 user:1 제거 후 22바이트 |
+| 통계 | LRU로 1개 제거했으므로 evicted_keys는 1 |
+| 즉시 만료 | EXPIRE의 0초 설정으로 user:2 삭제 |
+| TTL 확인 | 삭제된 user:2는 -2 |
+| 최종 키 | user:3만 남음, 종료하면 이 키도 사라짐 |
 
-숫자 결과는 모두 `(integer) N` 형식입니다. 정수는 ASCII 숫자와 선택적 부호를 허용하며
-signed 64-bit 범위를 검사합니다. `maxmemory`는 음수를 허용하지 않습니다.
+시간 경과에 따른 만료를 확인하려면 `SET temp hello`, `EXPIRE temp 3`, `TTL temp`를 차례로 실행하고 3초 이상 지난 뒤 `GET temp`를 입력합니다. 마지막 결과는 `(nil)`이며 중간 TTL 값은 입력 속도에 따라 달라집니다.
 
-```text
-GET
-(error) ERR wrong number of arguments for 'GET' command
-HELLO
-(error) ERR unknown command 'HELLO'
-CONFIG SET maxmemory abc
-(error) ERR value is not an integer or out of range
-```
+## 11. 확인된 내용과 검증 방법
 
-## 파일 구조
+### 자동 테스트 실행
 
-```text
-main.py                     실행 진입점
-mini_redis/
-  __init__.py               MiniRedis 공개 API
-  __main__.py               python3 -m mini_redis 진입점
-  linked_list.py            노드 및 이중 연결 리스트
-  hash_map.py               UTF-8 해시와 체이닝 해시맵
-  min_heap.py               키 위치 추적이 가능한 최소 힙
-  store.py                  문자열 저장소, LRU, TTL, 메모리 집계
-  cli.py                    파싱, 명령어 분기, 응답 형식, REPL
-tests/
-  test_mini_redis.py         자료구조·명령어·통합 테스트
-```
+Mini Redis를 실행 중이라면 먼저 `QUIT`으로 종료한 뒤 일반 터미널에서 실행합니다.
 
-## 자료구조와 동작 원리
-
-### 해시맵
-
-UTF-8 바이트를 순회하며 XOR와 곱셈으로 64비트 해시를 계산합니다(FNV-1a 방식 직접 구현).
-`해시 % 버킷 수`로 위치를 정하고, 충돌한 항목은 직접 구현한 이중 연결 리스트에 연결합니다.
-Python의 `hash()`를 사용하지 않습니다. 로드 팩터가 0.75를 **초과**하면 버킷을 두 배로 늘리고
-모든 항목의 위치를 다시 계산합니다. 기존 키의 값 교체는 키 수를 늘리지 않습니다.
-
-`put/get/remove/contains`는 평균 O(1), 충돌이 집중되면 O(n)입니다.
-리사이즈는 O(n)이며 삽입의 평균 상환 비용에 포함됩니다. 문자열 해시 계산은 키 바이트 길이에 비례합니다.
-
-### 이중 연결 리스트와 LRU
-
-노드는 `prev`, `next`, `data`를 가지며 `owner`로 소속을 검증합니다.
-`insert_front/insert_back/remove_front/remove_back/remove_node/move_to_front`를 모두 구현했습니다.
-각 연산은 리스트를 순회하지 않고 포인터만 변경하므로 O(1)입니다.
-
-LRU 리스트의 앞은 가장 최근, 뒤는 가장 오래 사용한 키입니다. 해시맵의 엔트리에 LRU 노드 참조를
-저장하므로, `SET` 또는 성공한 `GET`에서 해당 노드를 찾기 위해 리스트를 순회하지 않습니다.
-`EXISTS`, `TTL`, `EXPIRE`, `KEYS`, `DBSIZE`, `INFO`는 접근 순서를 바꾸지 않습니다.
-
-### 메모리 제한
-
-```text
-used_memory = 모든 키에 대한 (len(key.encode('utf-8')) + len(value.encode('utf-8')))의 합
-```
-
-자료구조 오버헤드는 제외합니다. 예를 들어 `이름` → `홍길동`은 6 + 9 = 15바이트입니다.
-덮어쓸 때는 기존 크기를 빼고 새 크기를 더합니다. 모든 삭제 경로는 공통 `_delete`를 통해 집계를 갱신합니다.
-
-SET 전에 단일 엔트리가 제한을 초과하는지 확인합니다. 초과하면 다음 오류를 반환하고 기존 값·TTL·LRU를
-보존합니다(이미 만료된 데이터 정리는 수행).
-
-```text
-(error) OOM command not allowed when used_memory > 'maxmemory'
-```
-
-저장 후 전체 크기가 제한을 넘으면 LRU의 뒤에서부터 여러 키를 제거할 수 있습니다.
-이때만 `evicted_keys`가 증가하며, DEL이나 TTL 만료는 포함하지 않습니다.
-PDF에 구체적으로 정해지지 않은 제한 축소 정책은 **CONFIG 실행 즉시 LRU 제거**로 정했습니다.
-0은 무제한이며 통계 카운터를 초기화하지 않습니다.
-
-### 최소 힙과 TTL
-
-`(expire_at, key)`를 최소 힙에 저장하고 `_heapify_up`, `_heapify_down`으로 순서를 복구합니다.
-`peek`는 O(1)이며 가장 빠른 만료를 바로 확인할 수 있습니다. `push/pop`은 평균 O(log n)입니다.
-별도의 자체 해시맵에 키의 힙 인덱스를 저장해 TTL 재설정과 임의 삭제도 평균 O(log n)에 처리합니다.
-동일 키를 push하면 기존 만료 시각을 갱신합니다. 삭제된 키의 만료 항목은 힙에도 남지 않습니다.
-
-시스템 시각 변경의 영향을 피하기 위해 `time.monotonic()`을 사용합니다.
-각 저장소 명령이 시작될 때 힙 루트부터 만료된 키를 정리합니다. 유휴 상태에서 백그라운드로 정리하지는
-않지만 다음 명령의 결과·키 개수·메모리 통계에는 만료된 키가 포함되지 않습니다.
-만료된 키가 k개이면 정리에 평균 O(k log n)이 추가됩니다.
-LRU 노드 이동 자체는 O(1)이지만 TTL이 있는 키의 실제 삭제에는 힙 제거 비용이 추가됩니다.
-
-## 요구사항 대응
-
-| PDF 필수 요구사항 | 구현 위치 | 검증 내용 |
-| --- | --- | --- |
-| 이중 연결 리스트 6개 메서드 | `linked_list.py` | 빈 리스트, 양 끝/중간 삭제, 이동, 연결 무결성 |
-| 체이닝 해시맵 6개 메서드, 0.75 초과 확장 | `hash_map.py` | 강제 충돌, 경계 확장, 덮어쓰기, 삭제 |
-| 최소 힙 4개 메서드 및 heapify | `min_heap.py` | 정렬 순서, 같은 만료 시각, 갱신, 임의 삭제 |
-| 문자열 명령어 6개 | `store.py`, `cli.py` | 출력, 빈 값, 따옴표, 대소문자, 없는 키 |
-| 메모리 명령어 2개 및 LRU | `store.py` | PDF 예시, UTF-8, 제한 축소, 다중 제거, OOM 원자성 |
-| TTL 명령어 2개 및 연계 삭제 | `store.py` | 만료 경계, TTL 초기화, 재설정, 삭제 후 재생성 |
-| REPL 및 오류 형식 | `cli.py` | 인자 수, 잘못된 정수, 잘못된 따옴표, 실제 프로세스 실행 |
-| 내장 KV 컬렉션 금지 | 전체 구현 | AST로 dict/set/collections 및 heapq 사용 검사 |
-
-배열 저장소와 출력 목록에는 Python `list`를 사용합니다. 리스트는 버킷/힙의 인덱스 접근과
-결과 나열에 사용하고, 해시맵·LRU·힙 알고리즘을 내장 컬렉션으로 대체하지 않습니다.
-범용 동적 배열, 스택/큐/덱 과제, 이진 트리/BST, Pub/Sub는 구현하지 않았습니다.
-네트워크, 영속성, Redis 복잡 자료형 및 동시성 처리도 범위에 포함하지 않습니다.
-
-## 테스트
-
-```bash
+```sh
 python3 -m unittest discover -s tests -v
 ```
 
-19개 테스트에 PDF 예시와 실제 CLI 프로세스 검증을 포함했습니다.
-고정 시드로 힙 작업 1,500회, 저장소 혼합 작업 1,000회를 실행하며 자료구조와 메모리 집계의 일관성도 검사합니다.
-TTL 테스트는 주입한 가상 시계로 실행하므로 실제 대기 시간이 필요하지 않습니다.
-Python 3.13에서 실행 검증했고, Python 3.8 문법 호환성은 AST 파싱으로 확인했습니다.
-EOF와 오류 이후의 정상 명령 처리도 검증합니다.
+테스트 19개가 통과했습니다. 아래는 주요 검증을 묶어 정리한 것입니다.
 
-## 추가 평가 보완: 코드 근거와 구현 한계
+| 분류 | 개수 | 확인 내용 |
+| --- | --- | --- |
+| StructureTests | 4 | 리스트 연결, 강제 해시 충돌·확장, 힙 갱신·삭제, 무작위 힙 순서 |
+| StoreTests | 11 | UTF-8 집계, PDF 예시, LRU, OOM 상태 보존, TTL, 구조 일관성 |
+| CliTests | 4 | 명령 출력, 입력 오류와 복구, 실제 프로세스 실행·EOF, 금지 컬렉션·문법 검사 |
+
+고정 시드로 힙 작업 1,500회와 저장소 혼합 작업 1,000회를 실행하여 위치 맵·LRU·키 개수·메모리 합의 일관성을 검사합니다. TTL은 가상 시계를 주입하므로 실제로 기다리지 않고 만료 경계를 확인합니다. 실제 CLI 프로세스도 실행하여 두 진입점과 종료를 검증합니다.
+
+### 사용자가 확인한 결과
+
+사용자가 실행해 공유한 결과에서도 `Ran 19 tests`와 마지막 `OK`를 확인했습니다. 이는 작성된 자동 테스트에 실패나 오류가 없다는 의미입니다. 실행 시간은 컴퓨터 환경에 따라 달라집니다.
+
+10만 키 처리량, 실제 프로세스 메모리 한계, LFU 성능은 측정하지 않았습니다. 뒤의 확장 설계는 구현된 기능이나 실측 결과와 구분합니다.
+
+## 12. 자주 만나는 상황과 해결 방법
+
+| 화면 또는 상황 | 이유와 해결 방법 |
+| --- | --- |
+| `mini-redis>`만 표시됨 | 정상입니다. 명령 입력을 기다리는 중입니다. |
+| `(error) ERR unknown command 'python3'` | 프로그램 안에 터미널 명령을 입력한 상태입니다. QUIT 후 실행하세요. |
+| `(nil)` | 없는 키이거나 TTL 만료·LRU 제거로 사라진 키입니다. |
+| TTL이 `-1` | 키는 있지만 만료 시간이 없습니다. SET 덮어쓰기도 TTL을 초기화합니다. |
+| TTL이 `-2` | 키가 존재하지 않습니다. |
+| `wrong number of arguments` | 명령별 인자 개수와 따옴표를 확인하세요. KEYS에는 패턴을 넣지 않습니다. |
+| `value is not an integer or out of range` | 정수 형식·범위를 확인하세요. maxmemory는 음수가 될 수 없습니다. |
+| `unbalanced quotes or invalid escape` | 문자열의 따옴표가 닫혔는지, 역슬래시가 올바른지 확인하세요. |
+| OOM 오류 | 단일 키와 값의 UTF-8 바이트 합이 제한보다 큽니다. 값을 줄이거나 제한을 조정하세요. |
+| 다시 켰더니 데이터가 없음 | 메모리 기반 프로그램이므로 정상입니다. |
+
+잘못된 명령의 예시는 `(error) ERR unknown command 'HELLO'`, OOM 출력은 `(error) OOM command not allowed when used_memory > 'maxmemory'`입니다. 정상적인 입력 오류 후에는 다시 명령을 입력할 수 있습니다.
+
+## 13. 사용 기술과 제출 범위
+
+Python 리스트는 버킷 배열·힙 배열·출력 목록으로만 사용하고, 해시맵·LRU·힙 알고리즘을 내장 컬렉션으로 대체하지 않습니다. 자료구조별 핵심 함수와 명령 처리에는 한국어 주석을 작성했습니다.
+
+```text
+mini_redis/
+├── main.py
+├── README.md
+├── .gitignore
+├── mini_redis/
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── cli.py
+│   ├── store.py
+│   ├── hash_map.py
+│   ├── linked_list.py
+│   └── min_heap.py
+└── tests/
+    └── test_mini_redis.py
+```
+
+실행을 위해 main.py뿐 아니라 내부 `mini_redis/` 패키지도 함께 제출해야 합니다. 검증 재현을 위해 tests/와 README도 포함합니다. 네트워크 통신·파일 저장·Redis 복잡 자료형·멀티스레딩은 구현 범위에 포함하지 않습니다. 실제 Redis 서버와 통신하는 프로그램이 아니라 핵심 자료구조를 학습하는 독립 CLI입니다.
+
+## 14. 세부 동작과 구현 한계
 
 다음 내용은 추가 평가표의 설명 요구를 보완합니다. LFU와 병렬 서버는 확장 설계이며 현재 구현 기능이 아닙니다.
 
@@ -223,7 +381,7 @@ EOF와 오류 이후의 정상 명령 처리도 검증합니다.
 최소 힙을 선택하면 전체 TTL을 매번 순회하거나 정렬하지 않고 가장 빠른 만료를 O(1)에 확인할 수 있습니다.
 루트가 아직 만료되지 않았다면 나머지도 만료되지 않았으므로 정리를 즉시 끝낼 수 있습니다.
 
-## LFU로 전환할 때의 설계 (평가 #15)
+## 15. LFU로 전환할 때의 설계
 
 LRU는 마지막 사용 시점, LFU는 사용 빈도로 제거 대상을 고릅니다. 단순히 LRU 리스트의 이름을 바꾸는 것으로는
 전환할 수 없습니다. 다음 정책과 자료구조 변경이 필요합니다.
@@ -249,7 +407,7 @@ LRU는 마지막 사용 시점, LFU는 사용 빈도로 제거 대상을 고릅�
 전환 시 접근 패턴을 고정한 실험에서 적중률과 GET/SET 지연을 함께 비교해야 합니다.
 LFU가 모든 접근 패턴에서 더 유리하다고 가정하지 않습니다. 현재 제출 코드는 요구된 LRU를 유지합니다.
 
-## 10만 개 키에서의 병목과 확장 대책 (평가 #16)
+## 16. 10만 개 키에서의 병목과 확장 대책
 
 아래는 코드 구조에 근거한 예상 병목과 확장 설계입니다. 10만 개 실측 결과나 처리량 보장은 아닙니다.
 
@@ -285,7 +443,7 @@ KEYS는 키 개수뿐 아니라 버킷 수도 순회하므로 O(capacity + n)이
 - CLI의 파싱·문자열 포맷·출력을 포함한 측정을 별도로 수행합니다. 대량 KEYS 출력 시간이 저장소 처리량으로 오인되지 않도록 합니다.
 - 성능 측정 뒤 키 개수·메모리 합·TTL 개수·LRU 연결의 일관성을 확인합니다. 작은 테스트 통과를 10만 규모 성능 검증으로 대체하지 않습니다.
 
-## 메모리 모델 비교 기준 (평가 #17)
+## 17. 메모리 모델 비교 기준
 
 채점용 `used_memory`와 제한은 PDF의 UTF-8 키·값 합으로 유지하고, 구조체 오버헤드를 측정할 경우 별도의
 `actual_memory` 지표로 보고하여 동일 데이터·동일 바이트 기준끼리 비교합니다. 오버헤드 포함 모델을 실험한다면

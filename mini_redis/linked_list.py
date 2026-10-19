@@ -19,10 +19,12 @@ class DoublyLinkedList:
         self.tail = None
         self.size = 0
 
+    # 새 노드 생성과 기존 노드 이동에서 공유한다. 앞쪽 연결만 바꾸므로 O(1)이다.
     def _attach_front(self, node):
         node.owner = self
         node.prev = None
         node.next = self.head
+        # 빈 리스트에서는 삽입한 노드가 head와 tail을 모두 맡는다.
         if self.head is None:
             self.tail = node
         else:
@@ -34,6 +36,7 @@ class DoublyLinkedList:
     def insert_front(self, data):
         return self._attach_front(Node(data))
 
+    # tail을 직접 참조하므로 마지막 노드를 찾는 순회 없이 O(1)에 삽입한다.
     def insert_back(self, data):
         node = Node(data)
         node.owner = self
@@ -50,6 +53,7 @@ class DoublyLinkedList:
         """노드를 분리하고 데이터를 반환한다. 다른 리스트의 노드는 거부한다."""
         if node.owner is not self:
             raise ValueError("node does not belong to this list")
+        # 앞·뒤 이웃을 서로 연결한다. 양 끝 노드라면 head 또는 tail도 수정한다.
         if node.prev is None:
             self.head = node.next
         else:
@@ -58,6 +62,7 @@ class DoublyLinkedList:
             self.tail = node.prev
         else:
             node.next.prev = node.prev
+        # 분리된 노드의 연결을 끊어 중복 삭제와 다른 리스트의 잘못된 사용을 방지한다.
         node.prev = node.next = node.owner = None
         self.size -= 1
         return node.data
@@ -68,6 +73,7 @@ class DoublyLinkedList:
     def remove_back(self):
         return None if self.tail is None else self.remove_node(self.tail)
 
+    # 노드를 새로 만들지 않고 분리 후 앞에 재연결한다. 두 작업 모두 O(1)이다.
     def move_to_front(self, node):
         if node.owner is not self:
             raise ValueError("node does not belong to this list")
@@ -78,5 +84,6 @@ class DoublyLinkedList:
     def __iter__(self):
         node = self.head
         while node is not None:
+            # yield는 데이터를 하나씩 전달해 for문에서 리스트를 순회할 수 있게 한다.
             yield node.data
             node = node.next

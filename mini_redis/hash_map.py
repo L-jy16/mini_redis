@@ -24,6 +24,7 @@ class HashMap:
         return result
 
     def _find(self, key):
+        # 해시를 버킷 수로 나눈 나머지가 배열 인덱스이다. 충돌하면 체인을 순회한다.
         bucket = self._buckets[self._hash(key) % self.capacity]
         node = None if bucket is None else bucket.head
         while node is not None:
@@ -35,17 +36,21 @@ class HashMap:
     def put(self, key, value):
         node = self._find(key)
         if node is not None:
+            # 기존 키는 값만 교체하며 저장된 키 개수는 증가시키지 않는다.
             node.data = (key, value)
             return
         index = self._hash(key) % self.capacity
         if self._buckets[index] is None:
             self._buckets[index] = DoublyLinkedList()
+        # 동일한 인덱스의 키들을 연결 리스트에 보관하는 체이닝 충돌 해결 방식이다.
         self._buckets[index].insert_back((key, value))
         self._size += 1
+        # size / capacity > 0.75를 정수 곱셈으로 검사한다.
         if self._size * 4 > self.capacity * 3:
             old = self._buckets
             self._buckets = [None] * (self.capacity * 2)
             self._size = 0
+            # 버킷 수가 바뀌면 나머지도 달라지므로 모든 키를 새 위치에 재삽입한다.
             for bucket in old:
                 if bucket is not None:
                     for key, value in bucket:
