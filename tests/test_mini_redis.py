@@ -66,6 +66,81 @@ class StructureTests(unittest.TestCase):
         self.assertEqual(sorted(table.keys()), sorted(str(i) for i in range(0, 100, 2)))
         self.assertIsNone(table.remove("absent"))
 
+    def test_hash_pool_reuses_identity_and_clears_references(self):
+        table = HashMap()
+        payload = object()
+        table.put("old", payload)
+        node = table._find("old")
+        self.assertIs(table.remove("old"), payload)
+        self.assertIsNone(node.data)
+        self.assertIsNone(node.prev)
+        self.assertIsNone(node.next)
+        self.assertIsNone(node.owner)
+        self.assertEqual(table._pool_size, 1)
+        table.remove("missing")
+        self.assertEqual(table._pool_size, 1)
+        table.put("new", "value")
+        self.assertIs(table._find("new"), node)
+        self.assertEqual(table.get("new"), "value")
+        self.assertFalse(table.contains("old"))
+        self.assertEqual(table.size(), 1)
+        self.assertEqual(table._pool_size, 0)
+        self.assertIsNone(table._node_pool[0])
+
+    def test_hash_pool_bound_collisions_and_resize(self):
+        class CollisionMap(HashMap):
+            @staticmethod
+            def _hash(key):
+                return 0
+        table = CollisionMap()
+        for i in range(100):
+            table.put(str(i), i)
+        nodes = [table._find(str(i)) for i in range(100)]
+        for i in range(100):
+            self.assertEqual(table.remove(str(i)), i)
+        self.assertEqual(table._pool_size, table.NODE_POOL_LIMIT)
+        self.assertEqual(len(table._node_pool), table.NODE_POOL_LIMIT)
+        for node in nodes:
+            self.assertIsNone(node.data)
+            self.assertIsNone(node.owner)
+            self.assertIsNone(node.prev)
+            self.assertIsNone(node.next)
+        # 빈 풀까지 소비한 뒤 리해시 경계를 넘어 삽입하고 체인 연결도 확인한다.
+        for i in range(200):
+            table.put("new" + str(i), i)
+        self.assertEqual(table._pool_size, 0)
+        self.assertEqual(table.size(), 200)
+        self.assertEqual(table.capacity, 512)
+        for i in range(200):
+            self.assertEqual(table.get("new" + str(i)), i)
+        bucket = table._buckets[0]
+        node = bucket.head
+        previous = None
+        count = 0
+        while node is not None:
+            self.assertIs(node.owner, bucket)
+            self.assertIs(node.prev, previous)
+            previous = node
+            node = node.next
+            count += 1
+        self.assertIs(previous, bucket.tail)
+        self.assertEqual(count, bucket.size)
+        self.assertEqual(count, 200)
+
+    def test_list_rejects_attached_node_reuse(self):
+        first = DoublyLinkedList()
+        second = DoublyLinkedList()
+        node = first.insert_back("value")
+        with self.assertRaises(ValueError):
+            second.insert_back_node(node)
+        self.assertEqual(list(first), ["value"])
+        self.assertEqual(second.size, 0)
+        first.remove_node(node)
+        self.assertIs(second.insert_back_node(node), node)
+        self.assertIs(node.owner, second)
+        self.assertEqual(list(second), ["value"])
+        self.assertEqual(first.size, 0)
+
     def test_heap_order_update_remove(self):
         heap = MinHeap()
         self.assertIsNone(heap.pop())

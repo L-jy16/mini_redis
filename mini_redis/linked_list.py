@@ -38,7 +38,12 @@ class DoublyLinkedList:
 
     # tail을 직접 참조하므로 마지막 노드를 찾는 순회 없이 O(1)에 삽입한다.
     def insert_back(self, data):
-        node = Node(data)
+        return self.insert_back_node(Node(data))
+
+    def insert_back_node(self, node):
+        """완전히 분리된 기존 노드를 O(1)에 연결하여 객체 재사용을 지원한다."""
+        if node.owner is not None or node.prev is not None or node.next is not None:
+            raise ValueError("node must be detached before insertion")
         node.owner = self
         node.prev = self.tail
         if self.tail is None:
